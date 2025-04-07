@@ -48,15 +48,33 @@ export default function App() {
     );
   }, []);
 
-  // Update words when page changes
+  // Updated voice/rate/pitch effect with better position handling
   useEffect(() => {
-    if (pagesWords.length > currentPageIndex) {
-      // Only update current word index if not speaking
-      if (!isSpeaking) {
-        setCurrentWordIndex(-1);
-      }
+    if (isSpeaking) {
+      const currentPosition = {
+        page: readingPositionRef.current.page,
+        wordIndex: readingPositionRef.current.wordIndex,
+        charIndex: utteranceRef.current?.charIndex || 0,
+      };
+
+      handleStopSpeaking();
+
+      setTimeout(() => {
+        // Validate position before restarting
+        if (
+          currentPosition.page >= 0 &&
+          currentPosition.page < pagesWords.length &&
+          currentPosition.wordIndex >= 0 &&
+          pagesWords[currentPosition.page]?.length > currentPosition.wordIndex
+        ) {
+          handleSpeakFromPosition(
+            currentPosition.page,
+            currentPosition.wordIndex
+          );
+        }
+      }, 250); // Increased timeout for better cleanup
     }
-  }, [currentPageIndex, pagesWords, isSpeaking]);
+  }, [selectedVoiceURI, speechRate, speechPitch]);
 
   // Function to populate voices
   const populateVoiceList = useCallback(() => {
@@ -96,31 +114,6 @@ export default function App() {
     };
   }, [populateVoiceList]);
 
-  // Handle voice, rate, or pitch change during speaking
-  useEffect(() => {
-    if (isSpeaking) {
-      // Remember current position precisely using the ref
-      const currentPosition = {
-        page: readingPositionRef.current.page,
-        wordIndex: readingPositionRef.current.wordIndex,
-      };
-
-      // Stop current speech
-      handleStopSpeaking();
-
-      // Wait a moment before restarting to ensure cleanup
-      setTimeout(() => {
-        // If we have a valid position, restart from there
-        if (currentPosition.wordIndex >= 0) {
-          handleSpeakFromPosition(
-            currentPosition.page,
-            currentPosition.wordIndex
-          );
-        }
-      }, 150);
-    }
-  }, [selectedVoiceURI, speechRate, speechPitch]);
-
   const handleFileChange = async (event) => {
     const file = event.target.files[0];
     if (!file || file.type !== 'application/pdf') {
@@ -146,7 +139,6 @@ export default function App() {
           const typedArray = new Uint8Array(e.target.result);
           const loadingTask = pdfjsLib.getDocument({ data: typedArray });
           const pdf = await loadingTask.promise;
-          setTotalPages(pdf.numPages);
 
           // Extract text from each page separately
           const extractedPageTexts = [];
@@ -160,8 +152,15 @@ export default function App() {
               pageText += item.str + ' ';
             });
 
-            extractedPageTexts.push(pageText.trim());
+            const trimmedText = pageText.trim();
+            // Only add page if it has content
+            if (trimmedText.length > 0) {
+              extractedPageTexts.push(trimmedText);
+            }
           }
+
+          // Update total pages with actual non-empty count
+          setTotalPages(extractedPageTexts.length);
 
           setPageTexts(extractedPageTexts);
           // Process words for each page
@@ -251,41 +250,32 @@ export default function App() {
       setIsSpeaking(false);
     };
 
-    // Track word boundaries to highlight current word
     utterance.onboundary = (event) => {
       if (event.name === 'word') {
-        try {
-          const upToIndex = event.charIndex + event.charLength;
-          const textUpToCharIndex = text.substring(0, upToIndex);
-          const wordCount = textUpToCharIndex.split(/\s+/).length - 1;
+        const currentPage = readingPositionRef.current.page;
+        const currentWords = pagesWords[currentPage] || [];
 
-          // Update our reading position with new word index
-          readingPositionRef.current.wordIndex = startWordIndex + wordCount;
+        // Direct tracking without cumulative indexes
+        const wordsSpoken = text
+          .substring(0, event.charIndex)
+          .split(/\s+/)
+          .filter((w) => w.trim()).length;
 
-          // Check if we need to flip pages
-          if (pagesWords.length > startPage) {
-            const currentPageWordCount = pagesWords[startPage].length;
+        const absoluteWordIndex = startWordIndex + wordsSpoken;
 
-            if (startWordIndex + wordCount >= currentPageWordCount) {
-              // We've moved to the next page
-              const nextPage = startPage + 1;
-              if (nextPage < pagesWords.length) {
-                readingPositionRef.current.page = nextPage;
-                readingPositionRef.current.wordIndex =
-                  startWordIndex + wordCount - currentPageWordCount;
-                setCurrentPageIndex(nextPage);
-                setCurrentWordIndex(readingPositionRef.current.wordIndex);
-              }
-            } else {
-              // Still on same page, just update word index
-              setCurrentWordIndex(startWordIndex + wordCount);
-            }
-          } else {
-            // Fallback if page data isn't loaded yet
-            setCurrentWordIndex(startWordIndex + wordCount);
+        // Update position refs and UI immediately
+        if (absoluteWordIndex < currentWords.length) {
+          readingPositionRef.current.wordIndex = absoluteWordIndex;
+          setCurrentWordIndex(absoluteWordIndex);
+        } else {
+          // Handle page transition
+          const nextPage = currentPage + 1;
+          if (nextPage < pagesWords.length) {
+            readingPositionRef.current.page = nextPage;
+            readingPositionRef.current.wordIndex = 0;
+            setCurrentPageIndex(nextPage);
+            setCurrentWordIndex(0);
           }
-        } catch (e) {
-          console.error('Error in boundary event:', e);
         }
       }
     };
@@ -312,29 +302,22 @@ export default function App() {
   const handleSpeakFromPosition = (pageIndex, wordIndex) => {
     handleStopSpeaking();
 
-    // Ensure valid page index
-    if (pageIndex < 0 || pageIndex >= pagesWords.length) {
+    if (
+      pageIndex < 0 ||
+      pageIndex >= pagesWords.length ||
+      wordIndex < 0 ||
+      wordIndex >= pagesWords[pageIndex].length
+    ) {
       return;
     }
 
-    // Get words for current page
-    const pageWords = pagesWords[pageIndex];
+    // Immediate UI updates before speech starts
+    setCurrentPageIndex(pageIndex);
+    setCurrentWordIndex(wordIndex);
 
-    // Ensure valid word index
-    if (wordIndex < 0 || wordIndex >= pageWords.length) {
-      return;
-    }
-
-    // Calculate text to speak from this position
-    // We'll speak just the current page first, then handle page transitions
-    const textToSpeak = pageWords.slice(wordIndex).join(' ');
-
-    // Create and start utterance
+    const textToSpeak = pagesWords[pageIndex].slice(wordIndex).join(' ');
     utteranceRef.current = createUtterance(textToSpeak, pageIndex, wordIndex);
     speechSynthesisRef.current.speak(utteranceRef.current);
-
-    // Update UI
-    setCurrentPageIndex(pageIndex);
   };
 
   const handleStopSpeaking = () => {
@@ -351,11 +334,10 @@ export default function App() {
   };
 
   const handlePageChange = (page) => {
-    if (isSpeaking) {
-      handleStopSpeaking();
-    }
     setCurrentPageIndex(page - 1);
-    setCurrentWordIndex(-1);
+    if (!isSpeaking) {
+      setCurrentWordIndex(-1);
+    }
   };
 
   // Rendering functions for clarity
@@ -369,7 +351,7 @@ export default function App() {
   );
 
   const renderFileUpload = () => (
-    <div className='mb-6'>
+    <div className='flex flex-col gap-2 mb-6'>
       <Label
         htmlFor='pdfUploader'
         value='Upload PDF File'
@@ -405,7 +387,7 @@ export default function App() {
           </div>
           <div
             id='voiceSelectionGroup'
-            className='flex flex-wrap gap-2'
+            className='flex flex-wrap gap-2 max-h-[300px] overflow-y-auto'
             role='radiogroup'
             aria-labelledby='voiceSelectionGroupLabel'
           >
@@ -507,7 +489,15 @@ export default function App() {
       );
     }
 
-    const currentPageWords = pagesWords[currentPageIndex] || [];
+    // Get the actual reading position from the ref
+    const readingPage = readingPositionRef.current.page;
+    const readingWordIndex = readingPositionRef.current.wordIndex;
+
+    // Determine which page/word to display based on speaking state
+    const displayedPage = isSpeaking ? readingPage : currentPageIndex;
+    const displayedWordIndex = isSpeaking ? readingWordIndex : currentWordIndex;
+
+    const currentPageWords = pagesWords[displayedPage] || [];
 
     return (
       <Card className='mt-6 border shadow-none'>
@@ -517,6 +507,8 @@ export default function App() {
             <Volume2 className='w-5 h-5 mr-2 text-gray-700' />
             <h2 className='text-lg font-medium'>
               Page {currentPageIndex + 1} of {totalPages}
+              {isSpeaking &&
+                ` (Reading Page ${readingPositionRef.current.page + 1})`}
             </h2>
           </div>
           {/* Only show play button if there are words on the page */}
@@ -526,7 +518,7 @@ export default function App() {
               onClick={
                 isSpeaking
                   ? handleStopSpeaking
-                  : () => handleSpeak(currentPageIndex)
+                  : () => handleSpeak(displayedPage)
               }
               disabled={!pageTexts.length} // Keep disabled check for safety
               size='sm'
@@ -550,8 +542,6 @@ export default function App() {
         <div className='border border-gray-300 rounded p-4 bg-gray-50 min-h-[150px] overflow-y-auto flex items-center justify-center'>
           {currentPageWords.length > 0 ? (
             <div className='text-sm leading-relaxed w-full'>
-              {' '}
-              {/* Ensure text takes full width */}
               {currentPageWords.map((word, index) => (
                 <span
                   key={`word-${index}-page-${currentPageIndex}`}
@@ -559,7 +549,9 @@ export default function App() {
                     handleSpeakFromPosition(currentPageIndex, index)
                   }
                   className={`inline-block mr-1 cursor-pointer rounded px-0.5 ${
-                    index === currentWordIndex
+                    isSpeaking &&
+                    readingPositionRef.current.page === currentPageIndex &&
+                    index === readingPositionRef.current.wordIndex
                       ? 'bg-violet-300 text-violet-900 font-medium'
                       : 'hover:bg-gray-200'
                   }`}
