@@ -97,14 +97,6 @@ export function useReader() {
     rate,
     pitch,
   });
-  dataRef.current = {
-    pagesWords,
-    totalPages,
-    voices,
-    selectedVoiceURI,
-    rate,
-    pitch,
-  };
 
   // Stable indirection so an utterance's onend can restart the next page
   // without capturing a stale copy of the function.
@@ -203,7 +195,20 @@ export function useReader() {
       }
     }, KEEP_ALIVE_MS);
   }, [clearKeepAlive]);
-  speakRef.current = speakFromPosition;
+
+  // Keep the latest-value refs current after each render, so utterance
+  // callbacks and the restart effect never read stale state.
+  useEffect(() => {
+    dataRef.current = {
+      pagesWords,
+      totalPages,
+      voices,
+      selectedVoiceURI,
+      rate,
+      pitch,
+    };
+    speakRef.current = speakFromPosition;
+  });
 
   const speakPage = useCallback(
     (page: number) => {
@@ -356,6 +361,8 @@ export function useReader() {
     }
     const { page, wordIndex } = positionRef.current;
     const resumeIndex = wordIndex >= 0 ? wordIndex : 0;
+    // Restarting playback with the new voice/rate/pitch is the whole point here.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     stop();
     const timer = window.setTimeout(() => {
       const words = dataRef.current.pagesWords[page];
